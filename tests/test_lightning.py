@@ -2,11 +2,12 @@ import torch
 from lightning.pytorch.cli import ArgsType, LightningCLI
 import pytest
 import lightning.pytorch as L
+import datetime
 
 from mfai.torch.dummy_dataset import DummyDataModule
 from mfai.torch.models import UNet
 from mfai.torch.segmentation_module import SegmentationLightningModule
-from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.loggers import TensorBoardLogger, MLFlowLogger
 from lightning.pytorch.callbacks.model_checkpoint import ModelCheckpoint
 
 
@@ -17,9 +18,16 @@ from lightning.pytorch.callbacks.model_checkpoint import ModelCheckpoint
         ("multiclass", 3, 3),
         ("multilabel", 2, 4),
         ("regression", 2, 1),
-    ],
+    ]
 )
-def test_lightning_training_loop(config):
+@pytest.mark.parametrize(
+    "logger_cls",
+    [
+        MLFlowLogger,
+        TensorBoardLogger,
+    ]
+)
+def test_lightning_training_loop(config, logger_cls):
     """
     Checks that our lightning module is trainable in all 4 modes.
     """
@@ -38,13 +46,18 @@ def test_lightning_training_loop(config):
     datamodule.setup()
 
     # Define logger, callbacks and lightning Trainer
-    tblogger = TensorBoardLogger(save_dir="logs/")
+    logger_args = {
+        TensorBoardLogger: {"save_dir": "logs/"},
+        MLFlowLogger: {"experiment_name": f"test_experiment_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"}
+    }
+    logger = logger_cls(**logger_args[logger_cls])
+    
     checkpointer = ModelCheckpoint(
         monitor="val_loss",
         filename="ckpt-{epoch:02d}-{val_loss:.2f}",
     )
     trainer = L.Trainer(
-        logger=tblogger,
+        logger=logger,
         max_epochs=1,
         callbacks=[checkpointer],
         limit_train_batches=2,

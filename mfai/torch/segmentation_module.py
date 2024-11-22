@@ -8,6 +8,7 @@ import torchmetrics as tm
 from pytorch_lightning.utilities import rank_zero_only
 
 from mfai.torch.models.base import ModelABC
+from mlflow.tracking.client import MlflowClient
 
 # define custom scalar in tensorboard, to have 2 lines on same graph
 layout = {
@@ -15,6 +16,14 @@ layout = {
         "loss": ["Multiline", ["loss/train", "loss/validation"]],
     },
 }
+
+# class AgnosticLogger():
+#     def __init__(self, logger) -> None:
+#         self.logger = logger 
+#         self.logger_cls = type(logger)
+        
+#     def log_image():
+        
 
 
 class SegmentationLightningModule(pl.LightningModule):
@@ -127,8 +136,11 @@ class SegmentationLightningModule(pl.LightningModule):
         Step shared by training and validation epochs.
         """
         avg_loss = torch.stack(outputs).mean()
-        tb = self.logger.experiment
-        tb.add_scalar(f"loss/{label}", avg_loss, self.current_epoch)
+        lg = self.logger.experiment
+        if isinstance(lg, MlflowClient):
+            lg.log_metric(run_id=self.logger.run_id, key=f"loss/{label}", value=avg_loss, step=self.current_epoch)
+        else:
+            lg.add_scalar(f"loss/{label}", avg_loss, self.current_epoch)
 
     def training_step(self, batch: Tuple[torch.tensor, torch.tensor], batch_idx: int):
         x, y = batch
@@ -145,12 +157,18 @@ class SegmentationLightningModule(pl.LightningModule):
         """Plots images on first batch of validation and log them in logger.
         Should be overwrited for each specific project, with matplotlib plots."""
         if batch_idx == 0:
-            tb = self.logger.experiment
+            lg = self.logger.experiment
             step = self.current_epoch
             dformat = "HW" if self.type_segmentation == "multiclass" else "CHW"
             if step == 0:
-                tb.add_image("val_plots/true_image", y[0], dataformats=dformat)
-            tb.add_image("val_plots/pred_image", y_hat[0], step, dataformats=dformat)
+                if isinstance(lg, MlflowClient):
+                    lg.log_image(key="val_plots/true_image", image=y[0].permute(1,2,0).detach().numpy(), run_id=self.logger.run_id)
+                else:
+                    lg.add_image("val_plots/true_image", y[0], dataformats=dformat)
+            if isinstance(lg, MlflowClient):
+                lg.log_image(key="val_plots/pred_image", image=y_hat[0].permute(1,2,0).detach().numpy(), step=step, run_id=self.logger.run_id)
+            else:
+                lg.add_image("val_plots/pred_image", y_hat[0], step, dataformats=dformat)
 
     def validation_step(self, batch: Tuple[torch.tensor, torch.tensor], batch_idx: int):
         x, y = batch
@@ -167,9 +185,12 @@ class SegmentationLightningModule(pl.LightningModule):
         self._shared_epoch_end(self.validation_loss, "validation")
         self.validation_loss.clear()  # free memory
         for metric_name, metric in self.metrics.items():
-            tb = self.logger.experiment
             # Use add scalar to log at step=current_epoch
-            tb.add_scalar(f"val_{metric_name}", metric.compute(), self.current_epoch)
+            lg = self.logger.experiment
+            if isinstance(lg, MlflowClient):
+                lg.log_metric(run_id=self.logger.run_id, key=f"val_{metric_name}", value=metric.compute(), step=self.current_epoch)
+            else:
+                lg.add_scalar(f"val_{metric_name}", metric.compute(), self.current_epoch)
             metric.reset()
 
     def test_step(self, batch: Tuple[torch.tensor, torch.tensor], batch_idx: int):
