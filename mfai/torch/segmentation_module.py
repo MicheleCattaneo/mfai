@@ -6,10 +6,12 @@ import pandas as pd
 import torch
 import torchmetrics as tm
 from pytorch_lightning.utilities import rank_zero_only
+from lightning.pytorch.loggers.logger import Logger
 import warnings
 
 from mfai.torch.models.base import ModelABC
 from mlflow.tracking.client import MlflowClient
+from lightning.pytorch.loggers import MLFlowLogger, TensorBoardLogger
 from mfai.torch.padding import pad_batch, undo_padding
 
 # define custom scalar in tensorboard, to have 2 lines on same graph
@@ -19,13 +21,54 @@ layout = {
     },
 }
 
-# class AgnosticLogger():
-#     def __init__(self, logger) -> None:
-#         self.logger = logger 
-#         self.logger_cls = type(logger)
+class AgnosticLogger(Logger):
+    
+    def __init__(self, backend_logger):
+        self.backend_logger = backend_logger
         
-#     def log_image():
+        if type(backend_logger) not in self.supported_loggers:
+            raise ValueError(f'Logger {type(backend_logger)} not yet supported.')
         
+    @property
+    def name(self):
+        return "AgnosticLogger"
+    
+    @property
+    def experiment(self):
+        return self.backend_logger.experiment
+    
+    def add_custom_scalars(self, layout):
+        if isinstance(self, TensorBoardLogger):
+            self.backend_logger.experiment.add_custom_scalars(layout) 
+    
+    @property
+    def run_id(self):
+        if type(self.backend_logger) == MLFlowLogger:
+            return self.backend_logger.run_id
+        return None
+    
+    @property
+    def supported_loggers(self):
+        return MLFlowLogger, TensorBoardLogger
+    
+    @property
+    def version(self):
+        return self.backend_logger.version
+    
+    @rank_zero_only
+    def log_hyperparams(self, params, *args, **kwargs):
+        self.backend_logger.log_hyperparams(params, *args, **kwargs)
+        
+    
+    @rank_zero_only
+    def log_metrics(self, metrics, step):
+        self.backend_logger.log_metrics(metrics, step)
+        
+    def log_images(self, key, image, step):
+        if isinstance(self.backend_logger, TensorBoardLogger):
+            self.backend_logger.experiment.add_image(key, image, step)
+        elif isinstance(self.backend_logger, MlflowClient):
+            self.backend_logger.expetiment.log_image(key=key, image=image.permute(1,2,0).detach().numpy(), run_id=self.backend_logger.run_id)
 
 
 class SegmentationLightningModule(pl.LightningModule):
@@ -187,7 +230,7 @@ class SegmentationLightningModule(pl.LightningModule):
         """Setup custom scalars panel on tensorboard and log hparams.
         Useful to easily compare train and valid loss and detect overtfitting."""
         print(f"Logs will be saved in \033[96m{self.logger.log_dir}\033[0m")
-        self.logger.experiment.add_custom_scalars(layout)
+        self.logger.add_custom_scalars(layout)
         hparams = dict(self.hparams)
         hparams["loss"] = self.loss.__class__.__name__
         hparams["model"] = self.model.__class__.__name__
@@ -222,13 +265,19 @@ class SegmentationLightningModule(pl.LightningModule):
             lg = self.logger.experiment
             step = self.current_epoch
             dformat = "HW" if self.type_segmentation == "multiclass" else "CHW"
+            
+            if y.ndim == 4:
+                to_plot = y[0].permute(1,2,0).detach().numpy()
+            else:
+                to_plot = y[0].detach().numpy()
+                
             if step == 0:
                 if isinstance(lg, MlflowClient):
-                    lg.log_image(key="val_plots/true_image", image=y[0].permute(1,2,0).detach().numpy(), run_id=self.logger.run_id)
+                    lg.log_image(key="val_plots/true_image", image=to_plot, run_id=self.logger.run_id)
                 else:
                     lg.add_image("val_plots/true_image", y[0], dataformats=dformat)
             if isinstance(lg, MlflowClient):
-                lg.log_image(key="val_plots/pred_image", image=y_hat[0].permute(1,2,0).detach().numpy(), step=step, run_id=self.logger.run_id)
+                lg.log_image(key="val_plots/pred_image", image=to_plot, step=step, run_id=self.logger.run_id)
             else:
                 lg.add_image("val_plots/pred_image", y_hat[0], step, dataformats=dformat)
 

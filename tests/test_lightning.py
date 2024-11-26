@@ -6,7 +6,7 @@ import datetime
 
 from mfai.torch.dummy_dataset import DummyDataModule
 from mfai.torch.models import UNet
-from mfai.torch.segmentation_module import SegmentationLightningModule
+from mfai.torch.segmentation_module import SegmentationLightningModule, AgnosticLogger
 from lightning.pytorch.loggers import TensorBoardLogger, MLFlowLogger
 from lightning.pytorch.callbacks.model_checkpoint import ModelCheckpoint
 
@@ -50,7 +50,10 @@ def test_lightning_training_loop(config, logger_cls):
         TensorBoardLogger: {"save_dir": "logs/"},
         MLFlowLogger: {"experiment_name": f"test_experiment_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"}
     }
-    logger = logger_cls(**logger_args[logger_cls])
+    # logger = logger_cls(**logger_args[logger_cls])
+    logger_backend = logger_cls(**logger_args[logger_cls])
+    logger = AgnosticLogger(logger_backend)
+    
     
     checkpointer = ModelCheckpoint(
         monitor="val_loss",

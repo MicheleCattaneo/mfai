@@ -164,6 +164,9 @@ cython_debug/
 # Lightning logs
 logs/
 
+# MLFlow logs
+mlruns/ 
+
 # Meteo France certificates
 matplotlibrc
 mf.crt
