@@ -55,22 +55,59 @@ class AgnosticLogger(Logger):
     def version(self):
         return self.backend_logger.version
     
+    @property
+    def log_dir(self):
+        if isinstance(self.backend_logger, MLFlowLogger):
+            return f"{self.backend_logger._tracking_uri.replace('file:', '')}/{self.backend_logger.experiment_id}/{self.backend_logger.run_id}"
+        if isinstance(self.backend_logger, TensorBoardLogger):
+            return self.backend_logger.log_dir
+    
     @rank_zero_only
-    def log_hyperparams(self, params, *args, **kwargs):
-        self.backend_logger.log_hyperparams(params, *args, **kwargs)
+    def log_hyperparams(self, params, *args):
+        if isinstance(self.backend_logger, MLFlowLogger):
+            params_ = {**params}
+            for arg in args:
+                params_ = {**params_, **arg}
+            self.backend_logger.log_hyperparams(params_)
+        elif isinstance(self.backend_logger, TensorBoardLogger):
+            self.backend_logger.log_hyperparams(params, *args)
         
     
     @rank_zero_only
     def log_metrics(self, metrics, step):
         self.backend_logger.log_metrics(metrics, step)
         
-    def log_images(self, key, image, step):
+    def log_image(self, key, image, step, **kwargs):
         if isinstance(self.backend_logger, TensorBoardLogger):
-            self.backend_logger.experiment.add_image(key, image, step)
-        elif isinstance(self.backend_logger, MlflowClient):
-            self.backend_logger.expetiment.log_image(key=key, image=image.permute(1,2,0).detach().numpy(), run_id=self.backend_logger.run_id)
+            dataformats = kwargs.get('dataformats', 'HW')
+            self.backend_logger.experiment.add_image(key, image, step, dataformats=dataformats)
+        elif isinstance(self.backend_logger, MLFlowLogger):
+            if image.ndim == 3:
+                image = image.permute(1,2,0)
+            image = image.detach().numpy()
+            self.backend_logger.experiment.log_image(key=key, image=image, run_id=self.backend_logger.run_id)
 
-
+    @rank_zero_only
+    def log_dataframe(self, df: pd.DataFrame, filename):
+        if isinstance(self.backend_logger, MLFlowLogger):
+            filename = Path(filename)
+            filename = filename.with_suffix('.json')
+            self.backend_logger.experiment.log_table(data=df, 
+                                          artifact_file=filename._str,
+                                          run_id=self.backend_logger.run_id)
+        elif isinstance(self.backend_logger, TensorBoardLogger):
+            filename = Path(filename)
+            filename = filename.with_suffix('.csv')
+            path_csv = Path(self.log_dir) / filename
+            df.to_csv(path_csv, index=False)
+            
+            
+    @rank_zero_only
+    def finalize(self, status: str = "success") -> None:
+        if isinstance(self.backend_logger, MLFlowLogger):
+            self.backend_logger.finalize(status=status)
+        
+            
 class SegmentationLightningModule(pl.LightningModule):
     def __init__(
         self,
@@ -266,20 +303,14 @@ class SegmentationLightningModule(pl.LightningModule):
             step = self.current_epoch
             dformat = "HW" if self.type_segmentation == "multiclass" else "CHW"
             
-            if y.ndim == 4:
-                to_plot = y[0].permute(1,2,0).detach().numpy()
-            else:
-                to_plot = y[0].detach().numpy()
                 
             if step == 0:
-                if isinstance(lg, MlflowClient):
-                    lg.log_image(key="val_plots/true_image", image=to_plot, run_id=self.logger.run_id)
-                else:
-                    lg.add_image("val_plots/true_image", y[0], dataformats=dformat)
-            if isinstance(lg, MlflowClient):
-                lg.log_image(key="val_plots/pred_image", image=to_plot, step=step, run_id=self.logger.run_id)
-            else:
-                lg.add_image("val_plots/pred_image", y_hat[0], step, dataformats=dformat)
+                self.logger.log_image(key="val_plots/true_image",
+                                      image=y[0],
+                                      step=step, dataformats=dformat)
+            self.logger.log_image(key='val_plots/pred_image',
+                                  image=y[0],
+                                  step=step, dataformats=dformat)
 
     def validation_step(self, batch: Tuple[torch.tensor, torch.tensor], batch_idx: int):
         x, y = batch
@@ -326,16 +357,17 @@ class SegmentationLightningModule(pl.LightningModule):
             data.append([name_sample] + [metrics_dict[m].item() for m in metrics])
         return pd.DataFrame(data, columns=["Name"] + metrics)
 
-    @rank_zero_only
-    def save_test_metrics_as_csv(self, df: pd.DataFrame) -> None:
-        path_csv = Path(self.logger.log_dir) / "metrics_test_set.csv"
-        df.to_csv(path_csv, index=False)
-        print(f"--> Metrics for all samples saved in \033[91m\033[1m{path_csv}\033[0m")
+    # @rank_zero_only
+    # def save_test_metrics_as_csv(self, df: pd.DataFrame) -> None:
+    #     path_csv = Path(self.logger.log_dir) / "metrics_test_set.csv"
+    #     df.to_csv(path_csv, index=False)
+    #     print(f"--> Metrics for all samples saved in \033[91m\033[1m{path_csv}\033[0m")
 
     def on_test_epoch_end(self):
         """Logs metrics in logger hparams view, at the end of run."""
         df = self.build_metrics_dataframe()
-        self.save_test_metrics_as_csv(df)
+        # self.save_test_metrics_as_csv(df)
+        self.logger.log_dataframe(df=df, filename="metrics_test_set.csv")
         df = df.drop("Name", axis=1)
 
     def last_activation(self, y_hat: torch.Tensor):

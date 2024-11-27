@@ -48,7 +48,7 @@ def test_lightning_training_loop(config, logger_cls):
     # Define logger, callbacks and lightning Trainer
     logger_args = {
         TensorBoardLogger: {"save_dir": "logs/"},
-        MLFlowLogger: {"experiment_name": f"test_experiment_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"}
+        MLFlowLogger: {"experiment_name": f"test_experiment_"}
     }
     # logger = logger_cls(**logger_args[logger_cls])
     logger_backend = logger_cls(**logger_args[logger_cls])
