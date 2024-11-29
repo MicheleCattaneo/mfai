@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Callable, Literal, Tuple, Optional
+from typing import Callable, Literal, Tuple, Optional, Dict
 
 import lightning.pytorch as pl
 import pandas as pd
@@ -94,7 +94,9 @@ class SegmentationLightningModule(pl.LightningModule):
         model: ModelABC,
         type_segmentation: Literal["binary", "multiclass", "multilabel", "regression"],
         loss: Callable,
-        padding_strategy: Literal['none', 'apply_and_undo'] = 'none'
+        padding_strategy: Literal['none', 'apply_and_undo'] = 'none',
+        optimizer_algo: Literal['Adam', 'SDG'] = "Adam", 
+        optimizer_kwargs: Dict = None
     ) -> None:
         """A lightning module adapted for segmentation of weather images.
 
@@ -105,6 +107,8 @@ class SegmentationLightningModule(pl.LightningModule):
             padding_stratey (Literal['none', 'apply_and_undo']): Defines the padding strategy to use. With 'none', it's is up to the user to
                 make sure that the input shapes fit the underlying model.
                 With 'apply_and_undo', padding is applied for the forward pass, but it is undone before returning the output. 
+            optimizer_algo (Literal['Adam', 'SDG']): The optimizer to use.
+            optimizer_kwargs: key-value dictionary with the arguments to directly pass to the optimizer's constructor, 
         """
         super().__init__()
         self.model = model
@@ -137,6 +141,10 @@ class SegmentationLightningModule(pl.LightningModule):
         # The agnostic logger will wrap any underlying logger, as soon
         # as it is available (lazy init)
         self._agnostic_logger = None
+        
+        if optimizer_kwargs is None:
+            self.optimizer_kwargs = {"lr": 0.001}
+        self.optimizer_algo = optimizer_algo
     
     @property
     def agnostic_logger(self):
@@ -379,4 +387,13 @@ class SegmentationLightningModule(pl.LightningModule):
         return y_hat
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=0.001)
+        optimizers = {
+            "Adam": torch.optim.Adam,
+            "SGD": torch.optim.SGD,
+            "default": torch.optim.Adam
+        }
+        if self.optimizer_algo not in optimizers:
+            print(f'Optimizer {self.optimizer_algo} not supported. Using default {optimizers['default']}')
+            
+        optimizer_cls = optimizers.get(self.optimizer_algo, optimizers['default'])
+        return optimizer_cls(self.parameters(), **self.optimizer_kwargs)
