@@ -21,48 +21,36 @@ layout = {
     },
 }
 
-class AgnosticLogger(Logger):
-    
+
+class AgnosticLogger():
+    """An AgnosticLogger can wraps multiple existing PytorchLightning Loggers.
+        It is used to manually log anything that can not be logged with 
+        LightningModule.log, i.e everything that is not a scalar. 
+    """
     def __init__(self, backend_logger):
-        self.backend_logger = backend_logger
-        
-        if type(backend_logger) not in self.supported_loggers:
-            raise ValueError(f'Logger {type(backend_logger)} not yet supported.')
-        
-    @property
-    def name(self):
-        return "AgnosticLogger"
-    
-    @property
-    def experiment(self):
-        return self.backend_logger.experiment
-    
-    def add_custom_scalars(self, layout):
-        if isinstance(self, TensorBoardLogger):
-            self.backend_logger.experiment.add_custom_scalars(layout) 
-    
-    @property
-    def run_id(self):
-        if type(self.backend_logger) == MLFlowLogger:
-            return self.backend_logger.run_id
-        return None
-    
+            self.backend_logger = backend_logger
+            
+            if type(backend_logger) not in self.supported_loggers:
+                raise ValueError(f'Logger {type(backend_logger)} not yet supported.')
+            
+            
     @property
     def supported_loggers(self):
         return MLFlowLogger, TensorBoardLogger
     
-    @property
-    def version(self):
-        return self.backend_logger.version
-    
+    def add_custom_scalars(self, layout):
+        if isinstance(self, TensorBoardLogger):
+            self.backend_logger.experiment.add_custom_scalars(layout)
+            
     @property
     def log_dir(self):
+        """ The location where the logs are stored.
+        """
         if isinstance(self.backend_logger, MLFlowLogger):
             return f"{self.backend_logger._tracking_uri.replace('file:', '')}/{self.backend_logger.experiment_id}/{self.backend_logger.run_id}"
         if isinstance(self.backend_logger, TensorBoardLogger):
             return self.backend_logger.log_dir
-    
-    @rank_zero_only
+        
     def log_hyperparams(self, params, *args):
         if isinstance(self.backend_logger, MLFlowLogger):
             params_ = {**params}
@@ -71,12 +59,7 @@ class AgnosticLogger(Logger):
             self.backend_logger.log_hyperparams(params_)
         elif isinstance(self.backend_logger, TensorBoardLogger):
             self.backend_logger.log_hyperparams(params, *args)
-        
-    
-    @rank_zero_only
-    def log_metrics(self, metrics, step):
-        self.backend_logger.log_metrics(metrics, step)
-        
+            
     def log_image(self, key, image, step, **kwargs):
         if isinstance(self.backend_logger, TensorBoardLogger):
             dataformats = kwargs.get('dataformats', 'HW')
@@ -86,14 +69,13 @@ class AgnosticLogger(Logger):
                 image = image.permute(1,2,0)
             image = image.detach().numpy()
             self.backend_logger.experiment.log_image(key=key, image=image, run_id=self.backend_logger.run_id)
-
-    @rank_zero_only
+            
     def log_dataframe(self, df: pd.DataFrame, filename):
         if isinstance(self.backend_logger, MLFlowLogger):
             filename = Path(filename)
             filename = filename.with_suffix('.json')
             self.backend_logger.experiment.log_table(data=df, 
-                                          artifact_file=filename._str,
+                                          artifact_file=filename.as_posix(),
                                           run_id=self.backend_logger.run_id)
         elif isinstance(self.backend_logger, TensorBoardLogger):
             filename = Path(filename)
@@ -101,11 +83,9 @@ class AgnosticLogger(Logger):
             path_csv = Path(self.log_dir) / filename
             df.to_csv(path_csv, index=False)
             
-            
-    @rank_zero_only
-    def finalize(self, status: str = "success") -> None:
-        if isinstance(self.backend_logger, MLFlowLogger):
-            self.backend_logger.finalize(status=status)
+    
+
+
         
             
 class SegmentationLightningModule(pl.LightningModule):
@@ -154,6 +134,18 @@ class SegmentationLightningModule(pl.LightningModule):
         if not self.model.auto_padding_supported and padding_strategy != 'none':
             warnings.warn(f"{self.model.__class__.__name__} does not support autopadding and will not be used.",
                           UserWarning)
+        # The agnostic logger will wrap any underlying logger, as soon
+        # as it is available (lazy init)
+        self._agnostic_logger = None
+    
+    @property
+    def agnostic_logger(self):
+        # lazy init
+
+        if self.logger is not None and self._agnostic_logger is None:
+            self._agnostic_logger = AgnosticLogger(self.logger)
+        return self._agnostic_logger
+                
 
     def get_metrics(self):
         """Defines the metrics that will be computed during valid and test steps."""
@@ -266,12 +258,12 @@ class SegmentationLightningModule(pl.LightningModule):
     def on_train_start(self):
         """Setup custom scalars panel on tensorboard and log hparams.
         Useful to easily compare train and valid loss and detect overtfitting."""
-        print(f"Logs will be saved in \033[96m{self.logger.log_dir}\033[0m")
-        self.logger.add_custom_scalars(layout)
+        print(f"Logs will be saved in \033[96m{self.agnostic_logger.log_dir}\033[0m")
+        self.agnostic_logger.add_custom_scalars(layout)
         hparams = dict(self.hparams)
         hparams["loss"] = self.loss.__class__.__name__
         hparams["model"] = self.model.__class__.__name__
-        self.logger.log_hyperparams(hparams, {"val_loss": 0, "val_f1": 0})
+        self.agnostic_logger.log_hyperparams(hparams, {"val_loss": 0, "val_f1": 0})
 
     def _shared_epoch_end(self, outputs: torch.Tensor, label: torch.Tensor):
         """Computes and logs the averaged loss at the end of an epoch on custom layout.
@@ -299,16 +291,15 @@ class SegmentationLightningModule(pl.LightningModule):
         """Plots images on first batch of validation and log them in logger.
         Should be overwrited for each specific project, with matplotlib plots."""
         if batch_idx == 0:
-            lg = self.logger.experiment
             step = self.current_epoch
             dformat = "HW" if self.type_segmentation == "multiclass" else "CHW"
             
                 
             if step == 0:
-                self.logger.log_image(key="val_plots/true_image",
+                self.agnostic_logger.log_image(key="val_plots/true_image",
                                       image=y[0],
                                       step=step, dataformats=dformat)
-            self.logger.log_image(key='val_plots/pred_image',
+            self.agnostic_logger.log_image(key='val_plots/pred_image',
                                   image=y[0],
                                   step=step, dataformats=dformat)
 
@@ -367,8 +358,8 @@ class SegmentationLightningModule(pl.LightningModule):
         """Logs metrics in logger hparams view, at the end of run."""
         df = self.build_metrics_dataframe()
         # self.save_test_metrics_as_csv(df)
-        self.logger.log_dataframe(df=df, filename="metrics_test_set.csv")
-        df = df.drop("Name", axis=1)
+        self.agnostic_logger.log_dataframe(df=df, filename="metrics_test_set.csv")
+        df = df.drop("Name", axis=1) 
 
     def last_activation(self, y_hat: torch.Tensor):
         """Applies appropriate activation according to task."""

@@ -50,10 +50,7 @@ def test_lightning_training_loop(config, logger_cls):
         TensorBoardLogger: {"save_dir": "logs/"},
         MLFlowLogger: {"experiment_name": f"test_experiment_"}
     }
-    # logger = logger_cls(**logger_args[logger_cls])
-    logger_backend = logger_cls(**logger_args[logger_cls])
-    logger = AgnosticLogger(logger_backend)
-    
+    logger = logger_cls(**logger_args[logger_cls])
     
     checkpointer = ModelCheckpoint(
         monitor="val_loss",
